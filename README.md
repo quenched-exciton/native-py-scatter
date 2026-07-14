@@ -21,7 +21,11 @@ or web server.
 - **Plot range limits** with one-click reset to full range
 - Custom **title, axis labels, and units**
 - Interactive matplotlib toolbar (pan / zoom)
-- **Save figure** as PNG, PDF, or TIFF at 600 dpi
+- **Publication figure options**: exact export size in inches, font size, and
+  export DPI
+- **Save figure** as PNG, PDF, or TIFF
+- **Export plotted data** to a tidy CSV — the numbers exactly as drawn, after
+  range limiting, smoothing, normalization, and offset
 
 ## Running
 

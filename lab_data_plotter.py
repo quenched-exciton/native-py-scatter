@@ -118,6 +118,11 @@ class LabDataPlotterApp:
         self._redraw_job = None
         self._loading_style = False
 
+        # Data exactly as drawn by the last update_plot (after range limiting,
+        # smoothing, normalization, and offset) — the source for CSV export.
+        self._plotted_data = []
+        self._plotted_x_col = None
+
         self._build_ui()
 
     # -------------------------
@@ -346,11 +351,40 @@ class LabDataPlotterApp:
             entry.bind("<FocusOut>", lambda e: self.schedule_redraw())
             self.label_vars[key] = var
 
+        # Figure options for publication-quality export
+        figure_frame = ttk.LabelFrame(controls, text="Figure Options (export)")
+        figure_frame.pack(fill="x", pady=(0, 8))
+
+        figure_grid = ttk.Frame(figure_frame)
+        figure_grid.pack(fill="x", padx=4, pady=(2, 4))
+        figure_grid.columnconfigure(1, weight=1)
+
+        self.figure_vars = {}
+        for row, (key, text, default, lo, hi, step) in enumerate([
+            ("fig_width", "Width (inches)", "6.0", 1.0, 30.0, 0.5),
+            ("fig_height", "Height (inches)", "4.0", 1.0, 30.0, 0.5),
+            ("font_size", "Font size (pt)", "10", 4, 32, 1),
+            ("dpi", "Export DPI", "600", 50, 1200, 50),
+        ]):
+            ttk.Label(figure_grid, text=text).grid(row=row, column=0, sticky="w")
+            var = tk.StringVar(value=default)
+            spin = ttk.Spinbox(
+                figure_grid, textvariable=var, from_=lo, to=hi, increment=step,
+                width=10, command=self.schedule_redraw,
+            )
+            spin.grid(row=row, column=1, sticky="ew", padx=(4, 0), pady=1)
+            spin.bind("<Return>", lambda e: self.schedule_redraw())
+            spin.bind("<FocusOut>", lambda e: self.schedule_redraw())
+            self.figure_vars[key] = var
+
         # Actions
         ttk.Button(controls, text="Update Plot", command=self.update_plot).pack(
             fill="x", pady=(0, 4)
         )
         ttk.Button(controls, text="💾 Save Figure…", command=self.save_figure).pack(
+            fill="x", pady=(0, 4)
+        )
+        ttk.Button(controls, text="📄 Export Plotted Data…", command=self.export_data).pack(
             fill="x", pady=(0, 8)
         )
 
@@ -616,6 +650,12 @@ class LabDataPlotterApp:
             self._set_default_range()
             self.schedule_redraw()
 
+    def _figure_option(self, key, fallback):
+        try:
+            return float(self.figure_vars[key].get())
+        except ValueError:
+            return fallback
+
     def _get_range(self):
         values = {}
         for key, fallback in [("x_min", 0.0), ("x_max", 1.0), ("y_min", 0.0), ("y_max", 1.0)]:
@@ -662,6 +702,12 @@ class LabDataPlotterApp:
         # -------------------------
         # CREATE FIGURE
         # -------------------------
+        # Artists pick up font.size at creation, so set it before rebuilding
+        matplotlib.rcParams["font.size"] = self._figure_option("font_size", 10)
+
+        self._plotted_data = []
+        self._plotted_x_col = x_col
+
         fig = self.figure
         fig.clf()
 
@@ -740,6 +786,11 @@ class LabDataPlotterApp:
                     else:
                         axes[i].plot(x_data, y_data, **plot_kwargs)
 
+                    self._plotted_data.append(
+                        {"file": display_name, "series": series_name,
+                         "x": x_data, "y": y_data}
+                    )
+
             except Exception as e:
                 self.log_message(f"{name}: {e}")
 
@@ -807,11 +858,59 @@ class LabDataPlotterApp:
         if ext == "tif":
             ext = "tiff"
 
+        width = self._figure_option("fig_width", 6.0)
+        height = self._figure_option("fig_height", 4.0)
+        dpi = self._figure_option("dpi", 600)
+
+        # The embedded canvas dictates the on-screen size, so the export size
+        # is applied only for savefig and restored afterwards.
+        original_size = self.figure.get_size_inches().copy()
         try:
-            self.figure.savefig(path, format=ext, dpi=600)
-            self.log_message(f"Figure saved to {path}")
+            self.figure.set_size_inches(width, height)
+            self.figure.tight_layout()
+            self.figure.savefig(path, format=ext, dpi=dpi)
+            self.log_message(f"Figure saved to {path} ({width}x{height} in, {dpi:g} dpi)")
         except Exception as e:
             self.log_message(f"Could not save figure: {e}")
+        finally:
+            self.figure.set_size_inches(*original_size)
+            self.figure.tight_layout()
+            self.canvas.draw()
+
+    def export_data(self):
+        """Export the data exactly as plotted (range-limited, smoothed,
+        normalized, offset) to a tidy CSV."""
+        if not self._plotted_data:
+            self.log_message("Nothing plotted yet — load data before exporting.")
+            return
+
+        path = filedialog.asksaveasfilename(
+            title="Export Plotted Data",
+            defaultextension=".csv",
+            filetypes=[("CSV", "*.csv")],
+            initialfile="plotted_data.csv",
+        )
+        if not path:
+            return
+
+        x_name = str(self._plotted_x_col)
+        if x_name in ("file", "series", "value"):
+            x_name = f"x_{x_name}"
+        frames = [
+            pd.DataFrame({
+                "file": rec["file"],
+                "series": rec["series"],
+                x_name: rec["x"].to_numpy(),
+                "value": rec["y"].to_numpy(),
+            })
+            for rec in self._plotted_data
+        ]
+
+        try:
+            pd.concat(frames, ignore_index=True).to_csv(path, index=False)
+            self.log_message(f"Plotted data exported to {path}")
+        except Exception as e:
+            self.log_message(f"Could not export data: {e}")
 
 
 def main():
