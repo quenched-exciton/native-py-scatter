@@ -8,16 +8,24 @@ or web server.
 ## Features
 
 - Open one or more **CSV / JSON** files (first valid file drives column choices)
+- **Per-file toggling**: include/exclude any loaded file from the plot and give
+  each file a custom legend name, without re-opening dialogs
 - **Data preview** of the first rows
 - **Auto-detection** of the X column (`time` / `wavelength` / `x`, then first
   monotonic numeric column) and of meaningful Y columns
 - **Overlay** or **Multi-panel** plot modes
+- **Per-series styling**: custom legend name, color, line style, line width,
+  and marker for each plotted column
 - Optional **smoothing** (rolling mean), **normalization**, and per-series
   **vertical offset** (overlay mode)
 - **Plot range limits** with one-click reset to full range
 - Custom **title, axis labels, and units**
 - Interactive matplotlib toolbar (pan / zoom)
-- **Save figure** as PNG, PDF, or TIFF at 600 dpi
+- **Publication figure options**: exact export size in inches, font size, and
+  export DPI
+- **Save figure** as PNG, PDF, or TIFF
+- **Export plotted data** to a tidy CSV — the numbers exactly as drawn, after
+  range limiting, smoothing, normalization, and offset
 
 ## Running
 

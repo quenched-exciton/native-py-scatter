@@ -13,7 +13,7 @@ import sys
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "libs"))
 
 import tkinter as tk
-from tkinter import filedialog, ttk
+from tkinter import colorchooser, filedialog, ttk
 
 import matplotlib
 
@@ -108,10 +108,20 @@ class LabDataPlotterApp:
         self.root.title("Lab Data Plotter")
         self.root.geometry("1200x800")
 
-        self.files = []  # list of (name, DataFrame)
+        # Each loaded file: {"name", "df", "enabled_var", "display_var"}
+        self.files = []
         self.df = None  # first valid file, drives column choices
 
+        # Per-column style overrides: {"name", "color", "linestyle", "width", "marker"}
+        self.series_styles = {}
+
         self._redraw_job = None
+        self._loading_style = False
+
+        # Data exactly as drawn by the last update_plot (after range limiting,
+        # smoothing, normalization, and offset) — the source for CSV export.
+        self._plotted_data = []
+        self._plotted_x_col = None
 
         self._build_ui()
 
@@ -137,6 +147,13 @@ class LabDataPlotterApp:
 
         self.files_label = ttk.Label(controls, text="No files loaded", wraplength=320)
         self.files_label.pack(anchor="w", pady=(0, 8))
+
+        # Loaded files: include/exclude toggle + editable legend name per file
+        self.files_frame = ttk.LabelFrame(controls, text="Loaded Files")
+        self.files_frame.pack(fill="x", pady=(0, 8))
+        ttk.Label(
+            self.files_frame, text="Open files to list them here.", foreground="gray"
+        ).pack(anchor="w", padx=4, pady=2)
 
         # Data preview
         preview_frame = ttk.LabelFrame(controls, text="Data Preview")
@@ -166,7 +183,70 @@ class LabDataPlotterApp:
         ttk.Label(axis_frame, text="Y-axis (select one or more)").pack(anchor="w", padx=4)
         self.y_listbox = tk.Listbox(axis_frame, selectmode="multiple", height=6, exportselection=False)
         self.y_listbox.pack(fill="x", padx=4, pady=(0, 4))
-        self.y_listbox.bind("<<ListboxSelect>>", lambda e: self.schedule_redraw())
+        self.y_listbox.bind("<<ListboxSelect>>", self._on_y_selection_changed)
+
+        # Series styles: per-column name, color, line style, width, marker
+        style_frame = ttk.LabelFrame(controls, text="Series Styles")
+        style_frame.pack(fill="x", pady=(0, 8))
+
+        ttk.Label(style_frame, text="Series").pack(anchor="w", padx=4)
+        self.style_series_var = tk.StringVar()
+        self.style_series_combo = ttk.Combobox(
+            style_frame, textvariable=self.style_series_var, state="readonly"
+        )
+        self.style_series_combo.pack(fill="x", padx=4, pady=(0, 4))
+        self.style_series_combo.bind("<<ComboboxSelected>>", lambda e: self._load_style_editor())
+
+        style_grid = ttk.Frame(style_frame)
+        style_grid.pack(fill="x", padx=4, pady=(0, 4))
+        style_grid.columnconfigure(1, weight=1)
+
+        ttk.Label(style_grid, text="Legend name").grid(row=0, column=0, sticky="w")
+        self.style_name_var = tk.StringVar()
+        name_entry = ttk.Entry(style_grid, textvariable=self.style_name_var)
+        name_entry.grid(row=0, column=1, sticky="ew", padx=(4, 0), pady=1)
+        name_entry.bind("<Return>", lambda e: self._apply_style_editor())
+        name_entry.bind("<FocusOut>", lambda e: self._apply_style_editor())
+
+        ttk.Label(style_grid, text="Color").grid(row=1, column=0, sticky="w")
+        color_row = ttk.Frame(style_grid)
+        color_row.grid(row=1, column=1, sticky="ew", padx=(4, 0), pady=1)
+        self.color_swatch = tk.Label(color_row, text="auto", width=8, relief="groove")
+        self.color_swatch.pack(side="left")
+        ttk.Button(color_row, text="Pick…", width=6, command=self._pick_series_color).pack(
+            side="left", padx=(4, 0)
+        )
+        ttk.Button(color_row, text="Auto", width=6, command=self._reset_series_color).pack(
+            side="left", padx=(4, 0)
+        )
+
+        ttk.Label(style_grid, text="Line style").grid(row=2, column=0, sticky="w")
+        self.style_linestyle_var = tk.StringVar(value="solid")
+        linestyle_combo = ttk.Combobox(
+            style_grid, textvariable=self.style_linestyle_var, state="readonly",
+            values=["solid", "dashed", "dotted", "dashdot"],
+        )
+        linestyle_combo.grid(row=2, column=1, sticky="ew", padx=(4, 0), pady=1)
+        linestyle_combo.bind("<<ComboboxSelected>>", lambda e: self._apply_style_editor())
+
+        ttk.Label(style_grid, text="Line width").grid(row=3, column=0, sticky="w")
+        self.style_width_var = tk.StringVar(value="1.5")
+        width_spin = ttk.Spinbox(
+            style_grid, textvariable=self.style_width_var, from_=0.5, to=10.0,
+            increment=0.5, command=self._apply_style_editor,
+        )
+        width_spin.grid(row=3, column=1, sticky="ew", padx=(4, 0), pady=1)
+        width_spin.bind("<Return>", lambda e: self._apply_style_editor())
+        width_spin.bind("<FocusOut>", lambda e: self._apply_style_editor())
+
+        ttk.Label(style_grid, text="Marker").grid(row=4, column=0, sticky="w")
+        self.style_marker_var = tk.StringVar(value="none")
+        marker_combo = ttk.Combobox(
+            style_grid, textvariable=self.style_marker_var, state="readonly",
+            values=["none", "o", "s", "^", "v", "D", "x", "+", "*"],
+        )
+        marker_combo.grid(row=4, column=1, sticky="ew", padx=(4, 0), pady=1)
+        marker_combo.bind("<<ComboboxSelected>>", lambda e: self._apply_style_editor())
 
         # Plot mode
         mode_frame = ttk.LabelFrame(controls, text="Plot Mode")
@@ -271,11 +351,40 @@ class LabDataPlotterApp:
             entry.bind("<FocusOut>", lambda e: self.schedule_redraw())
             self.label_vars[key] = var
 
+        # Figure options for publication-quality export
+        figure_frame = ttk.LabelFrame(controls, text="Figure Options (export)")
+        figure_frame.pack(fill="x", pady=(0, 8))
+
+        figure_grid = ttk.Frame(figure_frame)
+        figure_grid.pack(fill="x", padx=4, pady=(2, 4))
+        figure_grid.columnconfigure(1, weight=1)
+
+        self.figure_vars = {}
+        for row, (key, text, default, lo, hi, step) in enumerate([
+            ("fig_width", "Width (inches)", "6.0", 1.0, 30.0, 0.5),
+            ("fig_height", "Height (inches)", "4.0", 1.0, 30.0, 0.5),
+            ("font_size", "Font size (pt)", "10", 4, 32, 1),
+            ("dpi", "Export DPI", "600", 50, 1200, 50),
+        ]):
+            ttk.Label(figure_grid, text=text).grid(row=row, column=0, sticky="w")
+            var = tk.StringVar(value=default)
+            spin = ttk.Spinbox(
+                figure_grid, textvariable=var, from_=lo, to=hi, increment=step,
+                width=10, command=self.schedule_redraw,
+            )
+            spin.grid(row=row, column=1, sticky="ew", padx=(4, 0), pady=1)
+            spin.bind("<Return>", lambda e: self.schedule_redraw())
+            spin.bind("<FocusOut>", lambda e: self.schedule_redraw())
+            self.figure_vars[key] = var
+
         # Actions
         ttk.Button(controls, text="Update Plot", command=self.update_plot).pack(
             fill="x", pady=(0, 4)
         )
         ttk.Button(controls, text="💾 Save Figure…", command=self.save_figure).pack(
+            fill="x", pady=(0, 4)
+        )
+        ttk.Button(controls, text="📄 Export Plotted Data…", command=self.export_data).pack(
             fill="x", pady=(0, 8)
         )
 
@@ -331,23 +440,56 @@ class LabDataPlotterApp:
             except Exception as e:
                 self.log_message(f"{name}: {e}")
                 continue
-            self.files.append((name, df))
+            self.files.append({
+                "name": name,
+                "df": df,
+                "enabled_var": tk.BooleanVar(value=True),
+                "display_var": tk.StringVar(value=name),
+            })
 
         # First valid (non-empty) file drives column choices
         self.df = None
-        for name, df in self.files:
-            if not df.empty:
-                self.df = df
+        for f in self.files:
+            if not f["df"].empty:
+                self.df = f["df"]
                 break
+
+        self._rebuild_files_panel()
 
         if self.df is None:
             self.files_label.config(text="No valid files could be loaded.")
             self.log_message("No valid files could be loaded.")
             return
 
-        self.files_label.config(text=f"Loaded: {', '.join(name for name, _ in self.files)}")
+        self.files_label.config(text=f"{len(self.files)} file(s) loaded")
         self._populate_controls()
         self.update_plot()
+
+    def _rebuild_files_panel(self):
+        for child in self.files_frame.winfo_children():
+            child.destroy()
+
+        if not self.files:
+            ttk.Label(
+                self.files_frame, text="Open files to list them here.", foreground="gray"
+            ).pack(anchor="w", padx=4, pady=2)
+            return
+
+        for f in self.files:
+            row = ttk.Frame(self.files_frame)
+            row.pack(fill="x", padx=4, pady=1)
+            ttk.Checkbutton(
+                row, variable=f["enabled_var"], command=self.schedule_redraw
+            ).pack(side="left")
+            entry = ttk.Entry(row, textvariable=f["display_var"])
+            entry.pack(side="left", fill="x", expand=True)
+            entry.bind("<Return>", lambda e: self.schedule_redraw())
+            entry.bind("<FocusOut>", lambda e: self.schedule_redraw())
+        ttk.Label(
+            self.files_frame,
+            text="Uncheck to hide a file; edit its legend name inline.",
+            foreground="gray", wraplength=300,
+        ).pack(anchor="w", padx=4, pady=(2, 2))
 
     def _populate_controls(self):
         df = self.df
@@ -379,10 +521,107 @@ class LabDataPlotterApp:
             if col in auto_y:
                 self.y_listbox.selection_set(i)
 
+        self._refresh_series_selector()
         self._set_default_range()
 
     def _selected_y_cols(self):
         return [self.y_listbox.get(i) for i in self.y_listbox.curselection()]
+
+    def _on_y_selection_changed(self, event=None):
+        self._refresh_series_selector()
+        self.schedule_redraw()
+
+    # -------------------------
+    # SERIES STYLES
+    # -------------------------
+    def _series_style(self, col):
+        return self.series_styles.setdefault(
+            col, {"name": "", "color": None, "linestyle": "solid", "width": 1.5, "marker": "none"}
+        )
+
+    def _refresh_series_selector(self):
+        y_cols = self._selected_y_cols()
+        self.style_series_combo["values"] = y_cols
+        if y_cols and self.style_series_var.get() not in y_cols:
+            self.style_series_var.set(y_cols[0])
+        elif not y_cols:
+            self.style_series_var.set("")
+        self._load_style_editor()
+
+    def _load_style_editor(self):
+        """Show the selected series' style in the editor widgets."""
+        col = self.style_series_var.get()
+        self._loading_style = True
+        try:
+            if not col:
+                self.style_name_var.set("")
+                self.color_swatch.config(text="auto", background=self.root.cget("background"))
+                self.style_linestyle_var.set("solid")
+                self.style_width_var.set("1.5")
+                self.style_marker_var.set("none")
+                return
+            style = self._series_style(col)
+            self.style_name_var.set(style["name"])
+            if style["color"]:
+                self.color_swatch.config(text="", background=style["color"])
+            else:
+                self.color_swatch.config(text="auto", background=self.root.cget("background"))
+            self.style_linestyle_var.set(style["linestyle"])
+            self.style_width_var.set(str(style["width"]))
+            self.style_marker_var.set(style["marker"])
+        finally:
+            self._loading_style = False
+
+    def _apply_style_editor(self):
+        """Store the editor widgets' values on the selected series."""
+        if self._loading_style:
+            return
+        col = self.style_series_var.get()
+        if not col:
+            return
+        style = self._series_style(col)
+        style["name"] = self.style_name_var.get()
+        style["linestyle"] = self.style_linestyle_var.get()
+        try:
+            style["width"] = max(0.1, float(self.style_width_var.get()))
+        except ValueError:
+            style["width"] = 1.5
+        style["marker"] = self.style_marker_var.get()
+        self.schedule_redraw()
+
+    def _pick_series_color(self):
+        col = self.style_series_var.get()
+        if not col:
+            return
+        style = self._series_style(col)
+        _, hex_color = colorchooser.askcolor(
+            color=style["color"] or "#1f77b4", title=f"Color for {col}"
+        )
+        if hex_color:
+            style["color"] = hex_color
+            self.color_swatch.config(text="", background=hex_color)
+            self.schedule_redraw()
+
+    def _reset_series_color(self):
+        col = self.style_series_var.get()
+        if not col:
+            return
+        self._series_style(col)["color"] = None
+        self.color_swatch.config(text="auto", background=self.root.cget("background"))
+        self.schedule_redraw()
+
+    def _series_display_name(self, col):
+        name = self._series_style(col)["name"].strip()
+        return name if name else col
+
+    def _plot_kwargs(self, col):
+        style = self._series_style(col)
+        kwargs = {"linestyle": style["linestyle"], "linewidth": style["width"]}
+        if style["color"]:
+            kwargs["color"] = style["color"]
+        if style["marker"] and style["marker"] != "none":
+            kwargs["marker"] = style["marker"]
+        return kwargs
 
     def _set_default_range(self):
         df = self.df
@@ -410,6 +649,12 @@ class LabDataPlotterApp:
         if self.df is not None:
             self._set_default_range()
             self.schedule_redraw()
+
+    def _figure_option(self, key, fallback):
+        try:
+            return float(self.figure_vars[key].get())
+        except ValueError:
+            return fallback
 
     def _get_range(self):
         values = {}
@@ -457,6 +702,12 @@ class LabDataPlotterApp:
         # -------------------------
         # CREATE FIGURE
         # -------------------------
+        # Artists pick up font.size at creation, so set it before rebuilding
+        matplotlib.rcParams["font.size"] = self._figure_option("font_size", 10)
+
+        self._plotted_data = []
+        self._plotted_x_col = x_col
+
         fig = self.figure
         fig.clf()
 
@@ -474,9 +725,14 @@ class LabDataPlotterApp:
         # -------------------------
         # PROCESS FILES
         # -------------------------
-        for name, df_file in self.files:
+        for f in self.files:
+            if not f["enabled_var"].get():
+                continue
+
+            name = f["name"]
+            display_name = f["display_var"].get().strip() or name
             try:
-                df = df_file.copy()
+                df = f["df"].copy()
 
                 if df.empty:
                     continue
@@ -515,14 +771,25 @@ class LabDataPlotterApp:
                     if normalize:
                         y_data = y_data / y_data.max()
 
+                    series_name = self._series_display_name(y_col)
+                    plot_kwargs = self._plot_kwargs(y_col)
+
                     if plot_mode == "Overlay":
                         if use_offset:
                             y_data = y_data + i * offset_value
 
-                        label = f"{name} | {y_col}" if include_filename else y_col
-                        ax.plot(x_data, y_data, label=label)
+                        label = (
+                            f"{display_name} | {series_name}"
+                            if include_filename else series_name
+                        )
+                        ax.plot(x_data, y_data, label=label, **plot_kwargs)
                     else:
-                        axes[i].plot(x_data, y_data)
+                        axes[i].plot(x_data, y_data, **plot_kwargs)
+
+                    self._plotted_data.append(
+                        {"file": display_name, "series": series_name,
+                         "x": x_data, "y": y_data}
+                    )
 
             except Exception as e:
                 self.log_message(f"{name}: {e}")
@@ -558,7 +825,7 @@ class LabDataPlotterApp:
 
         else:
             for i, y_col in enumerate(y_cols):
-                axes[i].set_ylabel(y_col)
+                axes[i].set_ylabel(self._series_display_name(y_col))
                 if use_range:
                     axes[i].set_ylim(y_min, y_max)
 
@@ -591,11 +858,59 @@ class LabDataPlotterApp:
         if ext == "tif":
             ext = "tiff"
 
+        width = self._figure_option("fig_width", 6.0)
+        height = self._figure_option("fig_height", 4.0)
+        dpi = self._figure_option("dpi", 600)
+
+        # The embedded canvas dictates the on-screen size, so the export size
+        # is applied only for savefig and restored afterwards.
+        original_size = self.figure.get_size_inches().copy()
         try:
-            self.figure.savefig(path, format=ext, dpi=600)
-            self.log_message(f"Figure saved to {path}")
+            self.figure.set_size_inches(width, height)
+            self.figure.tight_layout()
+            self.figure.savefig(path, format=ext, dpi=dpi)
+            self.log_message(f"Figure saved to {path} ({width}x{height} in, {dpi:g} dpi)")
         except Exception as e:
             self.log_message(f"Could not save figure: {e}")
+        finally:
+            self.figure.set_size_inches(*original_size)
+            self.figure.tight_layout()
+            self.canvas.draw()
+
+    def export_data(self):
+        """Export the data exactly as plotted (range-limited, smoothed,
+        normalized, offset) to a tidy CSV."""
+        if not self._plotted_data:
+            self.log_message("Nothing plotted yet — load data before exporting.")
+            return
+
+        path = filedialog.asksaveasfilename(
+            title="Export Plotted Data",
+            defaultextension=".csv",
+            filetypes=[("CSV", "*.csv")],
+            initialfile="plotted_data.csv",
+        )
+        if not path:
+            return
+
+        x_name = str(self._plotted_x_col)
+        if x_name in ("file", "series", "value"):
+            x_name = f"x_{x_name}"
+        frames = [
+            pd.DataFrame({
+                "file": rec["file"],
+                "series": rec["series"],
+                x_name: rec["x"].to_numpy(),
+                "value": rec["y"].to_numpy(),
+            })
+            for rec in self._plotted_data
+        ]
+
+        try:
+            pd.concat(frames, ignore_index=True).to_csv(path, index=False)
+            self.log_message(f"Plotted data exported to {path}")
+        except Exception as e:
+            self.log_message(f"Could not export data: {e}")
 
 
 def main():
