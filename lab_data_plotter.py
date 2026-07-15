@@ -37,7 +37,9 @@ def detect_x_column(df):
 
     for col in df.select_dtypes(include=[np.number]).columns:
         series = df[col].dropna()
-        if series.is_monotonic_increasing:
+        # A constant (or empty) column is technically monotonic but is
+        # never a meaningful axis, so require at least two distinct values.
+        if series.nunique() > 1 and series.is_monotonic_increasing:
             return col
 
     numeric_cols = df.select_dtypes(include=[np.number]).columns
@@ -76,8 +78,14 @@ def resource_path(name):
 
 def load_dataframe(path):
     if path.lower().endswith(".csv"):
-        return pd.read_csv(path)
-    return pd.read_json(path)
+        # utf-8-sig strips Excel's BOM; skipinitialspace handles "a, b" headers
+        df = pd.read_csv(path, encoding="utf-8-sig", skipinitialspace=True)
+    else:
+        df = pd.read_json(path)
+    # Invisible whitespace in headers makes identically-formatted files
+    # mismatch the selected columns, so normalize names on load.
+    df.columns = [str(c).strip() for c in df.columns]
+    return df
 
 
 class ScrollableFrame(ttk.Frame):
@@ -749,21 +757,29 @@ class LabDataPlotterApp:
                 df = f["df"].copy()
 
                 if df.empty:
+                    self.log_message(f"{name}: File is empty — skipped")
                     continue
 
                 if x_col not in df.columns:
-                    self.log_message(f"{name}: Missing X column")
+                    found = ", ".join(str(c) for c in df.columns)
+                    self.log_message(
+                        f"{name}: Missing X column '{x_col}' (file has: {found})"
+                    )
                     continue
+
+                # Coerce X before range filtering: comparing a text column
+                # against the numeric limits would raise and skip the file.
+                df[x_col] = pd.to_numeric(df[x_col], errors="coerce")
 
                 if use_range:
                     df = df[(df[x_col] >= x_min) & (df[x_col] <= x_max)]
 
                 for i, y_col in enumerate(y_cols):
                     if y_col not in df.columns:
+                        self.log_message(f"{name}: Missing Y column '{y_col}' — skipped")
                         continue
 
                     # --- VALIDATION ---
-                    df[x_col] = pd.to_numeric(df[x_col], errors="coerce")
                     df[y_col] = pd.to_numeric(df[y_col], errors="coerce")
 
                     original_len = len(df)
