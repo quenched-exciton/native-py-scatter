@@ -47,14 +47,21 @@ dependencies there:
 pip install --target libs pandas numpy matplotlib
 ```
 
-## Building a standalone executable (optional)
+## Building a portable app folder (optional)
+
+Place your icon file as `app.ico` next to `lab_data_plotter.py` — it becomes
+both the `.exe` icon and the window (title bar) icon. Then, on Windows:
 
 ```bash
 pip install pyinstaller
-pyinstaller --onefile --windowed lab_data_plotter.py
+pyinstaller --noconfirm --clean --onedir --windowed --name LabDataPlotter --icon app.ico --add-data "app.ico;." --hidden-import PIL._tkinter_finder lab_data_plotter.py
 ```
 
-The executable is produced in `dist/`.
+The portable app is produced at `dist/LabDataPlotter/` — zip that folder and
+run `LabDataPlotter.exe` inside it on any Windows machine, no Python needed.
+
+On macOS/Linux the `--add-data` separator is `:` instead of `;`
+(`--add-data "app.ico:."`).
 
 ---
 Developed by Cristian J. Aviles-Martin Ph.D.

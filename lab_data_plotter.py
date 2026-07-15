@@ -67,6 +67,13 @@ def detect_y_columns(df, x_col):
     return y_cols
 
 
+def resource_path(name):
+    """Path to a bundled resource, both in source checkouts and in
+    PyInstaller bundles (where data files land in sys._MEIPASS)."""
+    base = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
+    return os.path.join(base, name)
+
+
 def load_dataframe(path):
     if path.lower().endswith(".csv"):
         return pd.read_csv(path)
@@ -107,6 +114,13 @@ class LabDataPlotterApp:
         self.root = root
         self.root.title("Lab Data Plotter")
         self.root.geometry("1200x800")
+
+        icon_path = resource_path("app.ico")
+        if os.path.exists(icon_path):
+            try:
+                self.root.iconbitmap(icon_path)
+            except tk.TclError:
+                pass  # .ico window icons are Windows-only
 
         # Each loaded file: {"name", "df", "enabled_var", "display_var"}
         self.files = []
