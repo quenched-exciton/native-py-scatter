@@ -270,6 +270,25 @@ class LabDataPlotterApp:
         marker_combo.grid(row=4, column=1, sticky="ew", padx=(4, 0), pady=1)
         marker_combo.bind("<<ComboboxSelected>>", lambda e: self._apply_style_editor())
 
+        ttk.Label(style_grid, text="Error column").grid(row=5, column=0, sticky="w")
+        self.style_err_var = tk.StringVar(value="(none)")
+        self.style_err_combo = ttk.Combobox(
+            style_grid, textvariable=self.style_err_var, state="readonly",
+            values=["(none)"],
+        )
+        self.style_err_combo.grid(row=5, column=1, sticky="ew", padx=(4, 0), pady=1)
+        self.style_err_combo.bind("<<ComboboxSelected>>", lambda e: self._apply_style_editor())
+
+        # Chart type
+        chart_frame = ttk.LabelFrame(controls, text="Chart Type")
+        chart_frame.pack(fill="x", pady=(0, 8))
+        self.chart_type_var = tk.StringVar(value="Line")
+        for chart_type in ("Line", "Bar"):
+            ttk.Radiobutton(
+                chart_frame, text=chart_type, value=chart_type,
+                variable=self.chart_type_var, command=self.schedule_redraw,
+            ).pack(anchor="w", padx=4)
+
         # Plot mode
         mode_frame = ttk.LabelFrame(controls, text="Plot Mode")
         mode_frame.pack(fill="x", pady=(0, 8))
@@ -352,6 +371,30 @@ class LabDataPlotterApp:
         offset_spin.pack(side="right")
         offset_spin.bind("<Return>", lambda e: self.schedule_redraw())
         offset_spin.bind("<FocusOut>", lambda e: self.schedule_redraw())
+
+        # Bar / error-bar geometry
+        bar_frame = ttk.LabelFrame(controls, text="Bars & Error Bars")
+        bar_frame.pack(fill="x", pady=(0, 8))
+
+        bar_grid = ttk.Frame(bar_frame)
+        bar_grid.pack(fill="x", padx=4, pady=(2, 4))
+        bar_grid.columnconfigure(1, weight=1)
+
+        self.bar_vars = {}
+        for row, (key, text, default, lo, hi, step) in enumerate([
+            ("group_width", "Bar group width", "0.8", 0.05, 1.0, 0.05),
+            ("capsize", "Error cap size", "3", 0, 10, 1),
+        ]):
+            ttk.Label(bar_grid, text=text).grid(row=row, column=0, sticky="w")
+            var = tk.StringVar(value=default)
+            spin = ttk.Spinbox(
+                bar_grid, textvariable=var, from_=lo, to=hi, increment=step,
+                width=10, command=self.schedule_redraw,
+            )
+            spin.grid(row=row, column=1, sticky="ew", padx=(4, 0), pady=1)
+            spin.bind("<Return>", lambda e: self.schedule_redraw())
+            spin.bind("<FocusOut>", lambda e: self.schedule_redraw())
+            self.bar_vars[key] = var
 
         # Labels
         labels_frame = ttk.LabelFrame(controls, text="📝 Customize Plot Labels")
@@ -566,6 +609,7 @@ class LabDataPlotterApp:
         self.x_combo["values"] = []
         self.x_var.set("")
         self.y_listbox.delete(0, "end")
+        self.style_err_combo["values"] = ["(none)"]
         self._refresh_series_selector()
         self._plotted_data = []
         self._plotted_x_col = None
@@ -594,6 +638,7 @@ class LabDataPlotterApp:
 
         self.x_combo["values"] = columns
         self.x_var.set(auto_x)
+        self.style_err_combo["values"] = ["(none)"] + columns
 
         self.y_listbox.delete(0, "end")
         for col in columns:
@@ -617,7 +662,8 @@ class LabDataPlotterApp:
     # -------------------------
     def _series_style(self, col):
         return self.series_styles.setdefault(
-            col, {"name": "", "color": None, "linestyle": "solid", "width": 1.5, "marker": "none"}
+            col, {"name": "", "color": None, "linestyle": "solid", "width": 1.5,
+                  "marker": "none", "err_col": ""}
         )
 
     def _refresh_series_selector(self):
@@ -640,6 +686,7 @@ class LabDataPlotterApp:
                 self.style_linestyle_var.set("solid")
                 self.style_width_var.set("1.5")
                 self.style_marker_var.set("none")
+                self.style_err_var.set("(none)")
                 return
             style = self._series_style(col)
             self.style_name_var.set(style["name"])
@@ -650,6 +697,7 @@ class LabDataPlotterApp:
             self.style_linestyle_var.set(style["linestyle"])
             self.style_width_var.set(str(style["width"]))
             self.style_marker_var.set(style["marker"])
+            self.style_err_var.set(style["err_col"] or "(none)")
         finally:
             self._loading_style = False
 
@@ -668,6 +716,8 @@ class LabDataPlotterApp:
         except ValueError:
             style["width"] = 1.5
         style["marker"] = self.style_marker_var.get()
+        err_sel = self.style_err_var.get()
+        style["err_col"] = "" if err_sel in ("", "(none)") else err_sel
         self.schedule_redraw()
 
     def _pick_series_color(self):
@@ -737,6 +787,58 @@ class LabDataPlotterApp:
         except ValueError:
             return fallback
 
+    def _bar_option(self, key, fallback):
+        try:
+            return float(self.bar_vars[key].get())
+        except ValueError:
+            return fallback
+
+    def _render_records(self, ax, records, is_bar, capsize, with_labels):
+        """Draw the collected series onto one axes, as lines or grouped bars."""
+        if not records:
+            return
+
+        if is_bar:
+            # X values become categories, in order of first appearance,
+            # shared across all series so grouped bars line up.
+            categories = []
+            for rec in records:
+                for value in rec["x"]:
+                    if value not in categories:
+                        categories.append(value)
+            position = {c: k for k, c in enumerate(categories)}
+
+            n = len(records)
+            group_width = min(max(self._bar_option("group_width", 0.8), 0.05), 1.0)
+            bar_width = group_width / n
+
+            for j, rec in enumerate(records):
+                offsets = [
+                    position[v] + (j - (n - 1) / 2) * bar_width for v in rec["x"]
+                ]
+                kwargs = {"width": bar_width, "capsize": capsize}
+                color = self._series_style(rec["y_col"])["color"]
+                if color:
+                    kwargs["color"] = color
+                if with_labels:
+                    kwargs["label"] = rec["label"]
+                yerr = rec["err"].to_numpy() if rec["err"] is not None else None
+                ax.bar(offsets, rec["y"].to_numpy(), yerr=yerr, **kwargs)
+
+            ax.set_xticks(range(len(categories)))
+            ax.set_xticklabels([str(c) for c in categories])
+        else:
+            for rec in records:
+                kwargs = self._plot_kwargs(rec["y_col"])
+                if with_labels:
+                    kwargs["label"] = rec["label"]
+                if rec["err"] is not None:
+                    ax.errorbar(
+                        rec["x"], rec["y"], yerr=rec["err"], capsize=capsize, **kwargs
+                    )
+                else:
+                    ax.plot(rec["x"], rec["y"], **kwargs)
+
     def _get_range(self):
         values = {}
         for key, fallback in [("x_min", 0.0), ("x_max", 1.0), ("y_min", 0.0), ("y_max", 1.0)]:
@@ -764,48 +866,34 @@ class LabDataPlotterApp:
 
         x_col = self.x_var.get()
         y_cols = self._selected_y_cols()
+        is_bar = self.chart_type_var.get() == "Bar"
         plot_mode = self.mode_var.get()
         smooth = self.smooth_var.get()
         normalize = self.normalize_var.get()
         include_filename = self.include_filename_var.get()
         use_range = self.use_range_var.get()
         x_min, x_max, y_min, y_max = self._get_range()
+        capsize = self._bar_option("capsize", 3.0)
 
         use_offset = False
         offset_value = 0.0
-        if plot_mode == "Overlay" and len(y_cols) > 1 and self.use_offset_var.get():
+        if (not is_bar and plot_mode == "Overlay" and len(y_cols) > 1
+                and self.use_offset_var.get()):
             use_offset = True
             try:
                 offset_value = float(self.offset_var.get())
             except ValueError:
                 offset_value = 0.0
 
-        # -------------------------
-        # CREATE FIGURE
-        # -------------------------
-        # Artists pick up font.size at creation, so set it before rebuilding
-        matplotlib.rcParams["font.size"] = self._figure_option("font_size", 10)
-
-        self._plotted_data = []
-        self._plotted_x_col = x_col
-
-        fig = self.figure
-        fig.clf()
-
-        if not y_cols:
-            self.canvas.draw()
-            return
-
-        if plot_mode == "Multi-panel":
-            axes = fig.subplots(len(y_cols), 1, sharex=True)
-            if len(y_cols) == 1:
-                axes = [axes]
-        else:
-            ax = fig.add_subplot(111)
+        if is_bar and smooth:
+            self.log_message("Smoothing is ignored for bar charts")
+        if is_bar and use_range:
+            self.log_message("X range is ignored for bar charts (Y limits still apply)")
 
         # -------------------------
-        # PROCESS FILES
+        # COLLECT SERIES
         # -------------------------
+        records = []
         for f in self.files:
             if not f["enabled_var"].get():
                 continue
@@ -826,12 +914,14 @@ class LabDataPlotterApp:
                     )
                     continue
 
-                # Coerce X before range filtering: comparing a text column
-                # against the numeric limits would raise and skip the file.
-                df[x_col] = pd.to_numeric(df[x_col], errors="coerce")
+                if not is_bar:
+                    # Coerce X before range filtering: comparing a text column
+                    # against the numeric limits would raise and skip the file.
+                    # Bar charts keep X as-is so text categories survive.
+                    df[x_col] = pd.to_numeric(df[x_col], errors="coerce")
 
-                if use_range:
-                    df = df[(df[x_col] >= x_min) & (df[x_col] <= x_max)]
+                    if use_range:
+                        df = df[(df[x_col] >= x_min) & (df[x_col] <= x_max)]
 
                 for i, y_col in enumerate(y_cols):
                     if y_col not in df.columns:
@@ -854,34 +944,76 @@ class LabDataPlotterApp:
                     x_data = df_clean[x_col]
                     y_data = df_clean[y_col]
 
-                    if smooth:
+                    err_data = None
+                    err_col = self._series_style(y_col)["err_col"]
+                    if err_col:
+                        if err_col in df.columns:
+                            err_data = pd.to_numeric(
+                                df[err_col], errors="coerce"
+                            ).loc[df_clean.index]
+                        else:
+                            self.log_message(
+                                f"{name}: Missing error column '{err_col}' for '{y_col}'"
+                            )
+
+                    if smooth and not is_bar:
                         y_data = y_data.rolling(5).mean()
 
                     if normalize:
-                        y_data = y_data / y_data.max()
+                        y_peak = y_data.max()
+                        y_data = y_data / y_peak
+                        if err_data is not None:
+                            err_data = err_data / y_peak
+
+                    if use_offset:
+                        y_data = y_data + i * offset_value
 
                     series_name = self._series_display_name(y_col)
-                    plot_kwargs = self._plot_kwargs(y_col)
-
-                    if plot_mode == "Overlay":
-                        if use_offset:
-                            y_data = y_data + i * offset_value
-
-                        label = (
-                            f"{display_name} | {series_name}"
-                            if include_filename else series_name
-                        )
-                        ax.plot(x_data, y_data, label=label, **plot_kwargs)
-                    else:
-                        axes[i].plot(x_data, y_data, **plot_kwargs)
-
-                    self._plotted_data.append(
-                        {"file": display_name, "series": series_name,
-                         "x": x_data, "y": y_data}
+                    label = (
+                        f"{display_name} | {series_name}"
+                        if include_filename else series_name
                     )
+                    records.append({
+                        "file": display_name, "series": series_name,
+                        "y_col": y_col, "y_index": i, "label": label,
+                        "x": x_data, "y": y_data, "err": err_data,
+                    })
 
             except Exception as e:
                 self.log_message(f"{name}: {e}")
+
+        # -------------------------
+        # CREATE FIGURE
+        # -------------------------
+        # Artists pick up font.size at creation, so set it before rebuilding
+        matplotlib.rcParams["font.size"] = self._figure_option("font_size", 10)
+
+        self._plotted_data = records
+        self._plotted_x_col = x_col
+
+        fig = self.figure
+        fig.clf()
+
+        if not y_cols:
+            self.canvas.draw()
+            return
+
+        if plot_mode == "Multi-panel":
+            axes = fig.subplots(len(y_cols), 1, sharex=True)
+            if len(y_cols) == 1:
+                axes = [axes]
+        else:
+            ax = fig.add_subplot(111)
+
+        # -------------------------
+        # RENDER
+        # -------------------------
+        if plot_mode == "Overlay":
+            self._render_records(ax, records, is_bar, capsize, with_labels=True)
+        else:
+            for i in range(len(y_cols)):
+                panel = [rec for rec in records if rec["y_index"] == i]
+                self._render_records(axes[i], panel, is_bar, capsize, with_labels=False)
 
         # -------------------------
         # LABELING
@@ -983,17 +1115,25 @@ class LabDataPlotterApp:
             return
 
         x_name = str(self._plotted_x_col)
-        if x_name in ("file", "series", "value"):
+        if x_name in ("file", "series", "value", "error"):
             x_name = f"x_{x_name}"
-        frames = [
-            pd.DataFrame({
+
+        has_err = any(rec.get("err") is not None for rec in self._plotted_data)
+        frames = []
+        for rec in self._plotted_data:
+            data = {
                 "file": rec["file"],
                 "series": rec["series"],
                 x_name: rec["x"].to_numpy(),
                 "value": rec["y"].to_numpy(),
-            })
-            for rec in self._plotted_data
-        ]
+            }
+            if has_err:
+                err = rec.get("err")
+                data["error"] = (
+                    err.to_numpy() if err is not None
+                    else np.full(len(rec["x"]), np.nan)
+                )
+            frames.append(pd.DataFrame(data))
 
         try:
             pd.concat(frames, ignore_index=True).to_csv(path, index=False)
