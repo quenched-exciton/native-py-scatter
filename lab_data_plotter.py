@@ -507,11 +507,70 @@ class LabDataPlotterApp:
             entry.pack(side="left", fill="x", expand=True)
             entry.bind("<Return>", lambda e: self.schedule_redraw())
             entry.bind("<FocusOut>", lambda e: self.schedule_redraw())
+            ttk.Button(
+                row, text="✕", width=2, command=lambda f=f: self.unload_file(f)
+            ).pack(side="left", padx=(2, 0))
         ttk.Label(
             self.files_frame,
-            text="Uncheck to hide a file; edit its legend name inline.",
+            text="Uncheck to hide a file, ✕ to unload it; edit its legend name inline.",
             foreground="gray", wraplength=300,
         ).pack(anchor="w", padx=4, pady=(2, 2))
+
+    def unload_file(self, file_entry):
+        """Remove a file from the session entirely (e.g. selected by mistake)."""
+        self.files = [f for f in self.files if f is not file_entry]
+        self._rebuild_files_panel()
+
+        # First valid remaining file drives column choices
+        self.df = None
+        for f in self.files:
+            if not f["df"].empty:
+                self.df = f["df"]
+                break
+
+        if self.df is None:
+            self.files_label.config(text="No files loaded")
+            self._clear_data_ui()
+            self.log_message(f"Unloaded {file_entry['name']}")
+            return
+
+        self.files_label.config(text=f"{len(self.files)} file(s) loaded")
+
+        # Re-detect columns, but keep the user's selections when they
+        # still exist in the remaining data.
+        prev_x = self.x_var.get()
+        prev_y = set(self._selected_y_cols())
+        self._populate_controls()
+
+        columns = self.df.columns.tolist()
+        if prev_x in columns:
+            self.x_var.set(prev_x)
+        surviving_y = prev_y.intersection(columns)
+        if surviving_y:
+            self.y_listbox.selection_clear(0, "end")
+            for i, col in enumerate(columns):
+                if col in surviving_y:
+                    self.y_listbox.selection_set(i)
+        self._refresh_series_selector()
+        self._set_default_range()
+
+        self.update_plot()  # clears the log, so log the unload after it
+        self.log_message(f"Unloaded {file_entry['name']}")
+
+    def _clear_data_ui(self):
+        """Reset preview, column choices, and the figure after the last
+        file is unloaded."""
+        self.preview.delete(*self.preview.get_children())
+        self.preview["columns"] = []
+        self.autodetect_label.config(text="")
+        self.x_combo["values"] = []
+        self.x_var.set("")
+        self.y_listbox.delete(0, "end")
+        self._refresh_series_selector()
+        self._plotted_data = []
+        self._plotted_x_col = None
+        self.figure.clf()
+        self.canvas.draw()
 
     def _populate_controls(self):
         df = self.df

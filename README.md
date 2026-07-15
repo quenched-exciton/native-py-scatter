@@ -8,8 +8,9 @@ or web server.
 ## Features
 
 - Open one or more **CSV / JSON** files (first valid file drives column choices)
-- **Per-file toggling**: include/exclude any loaded file from the plot and give
-  each file a custom legend name, without re-opening dialogs
+- **Per-file toggling and unloading**: include/exclude any loaded file from the
+  plot, unload a file selected by mistake, and give each file a custom legend
+  name — all without re-opening dialogs
 - **Data preview** of the first rows
 - **Auto-detection** of the X column (`time` / `wavelength` / `x`, then first
   monotonic numeric column) and of meaningful Y columns
@@ -26,6 +27,26 @@ or web server.
 - **Save figure** as PNG, PDF, or TIFF
 - **Export plotted data** to a tidy CSV — the numbers exactly as drawn, after
   range limiting, smoothing, normalization, and offset
+
+## Example data
+
+Save this as `experiment.csv` and open it in the app — `time` is auto-detected
+as the X axis and both signals as Y series:
+
+```csv
+time,signal_a,signal_b
+0.0,0.02,1.95
+0.5,0.48,1.72
+1.0,0.84,1.08
+1.5,1.00,0.31
+2.0,0.91,-0.42
+2.5,0.60,-1.02
+3.0,0.14,-1.63
+3.5,-0.35,-1.94
+```
+
+Open a second file with the same columns to overlay runs, then use the Loaded
+Files panel to rename, hide, or unload either one.
 
 ## Running
 
