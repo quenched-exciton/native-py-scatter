@@ -14,6 +14,10 @@ or web server.
 - **Data preview** of the first rows
 - **Auto-detection** of the X column (`time` / `wavelength` / `x`, then first
   monotonic numeric column) and of meaningful Y columns
+- **Line or Bar charts**: bar mode draws grouped bars and treats the X column
+  as categories (text labels work)
+- **Error bars**: pick an error column per series — drawn as caps on bars and
+  as error bars on line plots
 - **Overlay** or **Multi-panel** plot modes
 - **Per-series styling**: custom legend name, color, line style, line width,
   and marker for each plotted column
@@ -47,6 +51,18 @@ time,signal_a,signal_b
 
 Open a second file with the same columns to overlay runs, then use the Loaded
 Files panel to rename, hide, or unload either one.
+
+For a bar chart with error bars, save this as `assay.csv`, switch **Chart
+Type** to *Bar*, set X to `sample`, Y to `mean_intensity`, and in **Series
+Styles** choose `std_error` as the Error column:
+
+```csv
+sample,mean_intensity,std_error
+Control,12.4,0.8
+Treated A,18.9,1.1
+Treated B,15.2,0.9
+Blank,2.1,0.3
+```
 
 ## Running
 
