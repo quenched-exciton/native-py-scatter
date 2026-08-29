@@ -1,0 +1,5 @@
+sample,mean_intensity,std_error
+control,1.00,0.05
+low_dose,1.42,0.09
+mid_dose,2.13,0.14
+high_dose,3.05,0.21

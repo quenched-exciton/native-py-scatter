@@ -6,6 +6,7 @@ auto-detects X/Y columns, and plots with matplotlib embedded in the window.
 Developed by Cristian J. Aviles-Martin Ph.D.
 """
 
+import math
 import os
 import sys
 
@@ -76,6 +77,18 @@ def resource_path(name):
     return os.path.join(base, name)
 
 
+def _finite_float(value, fallback):
+    """Coerce ``value`` to float, returning ``fallback`` when it is
+    unparseable or not finite (NaN / ±Inf). ``float("nan")`` succeeds
+    silently, so an explicit finiteness check is needed to keep bad values
+    out of the range fields and out of ``Axes.set_ylim``."""
+    try:
+        result = float(value)
+    except (TypeError, ValueError):
+        return fallback
+    return result if math.isfinite(result) else fallback
+
+
 def load_dataframe(path):
     if path.lower().endswith(".csv"):
         # utf-8-sig strips Excel's BOM; skipinitialspace handles "a, b" headers
@@ -108,6 +121,28 @@ class ScrollableFrame(ttk.Frame):
         scrollbar.pack(side="right", fill="y")
 
         def _on_mousewheel(event):
+            # bind_all is process-wide, so only scroll the panel when the
+            # pointer is actually over it — never when it is over the figure
+            # canvas or another window.
+            try:
+                widget = event.widget
+                if not isinstance(widget, tk.Misc):
+                    widget = self.nametowidget(widget)
+            except (KeyError, tk.TclError):
+                return
+
+            name = str(widget)
+            if name != str(self) and not name.startswith(str(self) + "."):
+                return
+
+            # Widgets that scroll on their own (the Y-axis list, the data
+            # preview, the message log) keep their wheel events.
+            node = widget
+            while isinstance(node, tk.Misc) and node is not self:
+                if node.winfo_class() in ("Listbox", "Treeview", "Text"):
+                    return
+                node = node.master
+
             if event.num == 4 or event.delta > 0:
                 canvas.yview_scroll(-1, "units")
             elif event.num == 5 or event.delta < 0:
@@ -166,6 +201,21 @@ class LabDataPlotterApp:
         ttk.Button(controls, text="Open CSV / JSON files…", command=self.open_files).pack(
             fill="x", pady=(0, 8)
         )
+
+        # Chart type — a segmented Line/Bar toggle (one click to switch),
+        # kept at the top of the controls so the mode is easy to flip.
+        chart_frame = ttk.LabelFrame(controls, text="Chart Type")
+        chart_frame.pack(fill="x", pady=(0, 8))
+        chart_toggle = ttk.Frame(chart_frame)
+        chart_toggle.pack(fill="x", padx=4, pady=4)
+        self.chart_type_var = tk.StringVar(value="Line")
+        for i, chart_type in enumerate(("Line", "Bar")):
+            chart_toggle.columnconfigure(i, weight=1)
+            ttk.Radiobutton(
+                chart_toggle, text=chart_type, value=chart_type,
+                variable=self.chart_type_var, command=self.schedule_redraw,
+                style="Toolbutton",
+            ).grid(row=0, column=i, sticky="ew")
 
         self.files_label = ttk.Label(controls, text="No files loaded", wraplength=320)
         self.files_label.pack(anchor="w", pady=(0, 8))
@@ -278,16 +328,6 @@ class LabDataPlotterApp:
         )
         self.style_err_combo.grid(row=5, column=1, sticky="ew", padx=(4, 0), pady=1)
         self.style_err_combo.bind("<<ComboboxSelected>>", lambda e: self._apply_style_editor())
-
-        # Chart type
-        chart_frame = ttk.LabelFrame(controls, text="Chart Type")
-        chart_frame.pack(fill="x", pady=(0, 8))
-        self.chart_type_var = tk.StringVar(value="Line")
-        for chart_type in ("Line", "Bar"):
-            ttk.Radiobutton(
-                chart_frame, text=chart_type, value=chart_type,
-                variable=self.chart_type_var, command=self.schedule_redraw,
-            ).pack(anchor="w", padx=4)
 
         # Plot mode
         mode_frame = ttk.LabelFrame(controls, text="Plot Mode")
@@ -498,6 +538,9 @@ class LabDataPlotterApp:
 
         self.clear_log()
         self.files = []
+        # A fresh set of files means the previous per-column styles no longer
+        # apply — a same-named column in the new data is unrelated.
+        self.series_styles = {}
         for path in paths:
             name = os.path.basename(path)
             try:
@@ -610,6 +653,7 @@ class LabDataPlotterApp:
         self.x_var.set("")
         self.y_listbox.delete(0, "end")
         self.style_err_combo["values"] = ["(none)"]
+        self.series_styles = {}
         self._refresh_series_selector()
         self._plotted_data = []
         self._plotted_x_col = None
@@ -760,16 +804,19 @@ class LabDataPlotterApp:
         y_cols = self._selected_y_cols()
 
         try:
-            x_default_min = float(df[x_col].min())
-            x_default_max = float(df[x_col].max())
+            x_default_min = _finite_float(df[x_col].min(), 0.0)
+            x_default_max = _finite_float(df[x_col].max(), 1.0)
         except Exception:
-            x_default_min, x_default_max = 0, 1
+            x_default_min, x_default_max = 0.0, 1.0
 
-        try:
-            y_default_min = float(df[y_cols].min().min())
-            y_default_max = float(df[y_cols].max().max())
-        except Exception:
-            y_default_min, y_default_max = 0, 1
+        if y_cols:
+            try:
+                y_default_min = _finite_float(df[y_cols].min().min(), 0.0)
+                y_default_max = _finite_float(df[y_cols].max().max(), 1.0)
+            except Exception:
+                y_default_min, y_default_max = 0.0, 1.0
+        else:
+            y_default_min, y_default_max = 0.0, 1.0
 
         self.range_vars["x_min"].set(str(x_default_min))
         self.range_vars["x_max"].set(str(x_default_max))
@@ -842,10 +889,7 @@ class LabDataPlotterApp:
     def _get_range(self):
         values = {}
         for key, fallback in [("x_min", 0.0), ("x_max", 1.0), ("y_min", 0.0), ("y_max", 1.0)]:
-            try:
-                values[key] = float(self.range_vars[key].get())
-            except ValueError:
-                values[key] = fallback
+            values[key] = _finite_float(self.range_vars[key].get(), fallback)
         return values["x_min"], values["x_max"], values["y_min"], values["y_max"]
 
     # -------------------------
@@ -957,7 +1001,10 @@ class LabDataPlotterApp:
                             )
 
                     if smooth and not is_bar:
-                        y_data = y_data.rolling(5).mean()
+                        # min_periods=1 keeps the edges (and short series left
+                        # after dropping invalid rows) from collapsing to NaN,
+                        # which previously blanked the plot entirely.
+                        y_data = y_data.rolling(5, min_periods=1).mean()
 
                     if normalize:
                         y_peak = y_data.max()
@@ -982,81 +1029,82 @@ class LabDataPlotterApp:
             except Exception as e:
                 self.log_message(f"{name}: {e}")
 
-        # -------------------------
-        # CREATE FIGURE
-        # -------------------------
-        # Artists pick up font.size at creation, so set it before rebuilding
-        matplotlib.rcParams["font.size"] = self._figure_option("font_size", 10)
-
         self._plotted_data = records
         self._plotted_x_col = x_col
 
-        fig = self.figure
-        fig.clf()
-
-        if not y_cols:
-            self.canvas.draw()
-            return
-
-        if plot_mode == "Multi-panel":
-            axes = fig.subplots(len(y_cols), 1, sharex=True)
-            if len(y_cols) == 1:
-                axes = [axes]
-        else:
-            ax = fig.add_subplot(111)
-
         # -------------------------
-        # RENDER
+        # CREATE FIGURE
         # -------------------------
-        if plot_mode == "Overlay":
-            self._render_records(ax, records, is_bar, capsize, with_labels=True)
-        else:
-            for i in range(len(y_cols)):
-                panel = [rec for rec in records if rec["y_index"] == i]
-                self._render_records(axes[i], panel, is_bar, capsize, with_labels=False)
+        # Apply the chosen font size locally so the process-wide matplotlib
+        # defaults are never left mutated (which used to leak between the
+        # on-screen render and later exports).
+        with matplotlib.rc_context({"font.size": self._figure_option("font_size", 10)}):
+            fig = self.figure
+            fig.clf()
 
-        # -------------------------
-        # LABELING
-        # -------------------------
-        x_label = self.label_vars["x_label"].get()
-        x_unit = self.label_vars["x_unit"].get()
-        y_label = self.label_vars["y_label"].get()
-        y_unit = self.label_vars["y_unit"].get()
-        custom_title = self.label_vars["title"].get()
+            if not y_cols:
+                self.canvas.draw()
+                return
 
-        final_xlabel = x_label if x_label else x_col
-        if x_unit:
-            final_xlabel += f" ({x_unit})"
+            if plot_mode == "Multi-panel":
+                axes = fig.subplots(len(y_cols), 1, sharex=True)
+                if len(y_cols) == 1:
+                    axes = [axes]
+            else:
+                ax = fig.add_subplot(111)
 
-        if plot_mode == "Overlay":
-            if use_range:
-                ax.set_ylim(y_min, y_max)
+            # -------------------------
+            # RENDER
+            # -------------------------
+            if plot_mode == "Overlay":
+                self._render_records(ax, records, is_bar, capsize, with_labels=True)
+            else:
+                for i in range(len(y_cols)):
+                    panel = [rec for rec in records if rec["y_index"] == i]
+                    self._render_records(axes[i], panel, is_bar, capsize, with_labels=False)
 
-            final_ylabel = y_label if y_label else "Signal"
-            if y_unit:
-                final_ylabel += f" ({y_unit})"
+            # -------------------------
+            # LABELING
+            # -------------------------
+            x_label = self.label_vars["x_label"].get()
+            x_unit = self.label_vars["x_unit"].get()
+            y_label = self.label_vars["y_label"].get()
+            y_unit = self.label_vars["y_unit"].get()
+            custom_title = self.label_vars["title"].get()
 
-            if custom_title:
-                ax.set_title(custom_title)
+            final_xlabel = x_label if x_label else x_col
+            if x_unit:
+                final_xlabel += f" ({x_unit})"
 
-            ax.set_xlabel(final_xlabel)
-            ax.set_ylabel(final_ylabel)
-            if ax.get_legend_handles_labels()[0]:
-                ax.legend()
-
-        else:
-            for i, y_col in enumerate(y_cols):
-                axes[i].set_ylabel(self._series_display_name(y_col))
+            if plot_mode == "Overlay":
                 if use_range:
-                    axes[i].set_ylim(y_min, y_max)
+                    ax.set_ylim(y_min, y_max)
 
-            axes[-1].set_xlabel(final_xlabel)
+                final_ylabel = y_label if y_label else "Signal"
+                if y_unit:
+                    final_ylabel += f" ({y_unit})"
 
-            if custom_title:
-                fig.suptitle(custom_title)
+                if custom_title:
+                    ax.set_title(custom_title)
 
-        fig.tight_layout()
-        self.canvas.draw()
+                ax.set_xlabel(final_xlabel)
+                ax.set_ylabel(final_ylabel)
+                if ax.get_legend_handles_labels()[0]:
+                    ax.legend()
+
+            else:
+                for i, y_col in enumerate(y_cols):
+                    axes[i].set_ylabel(self._series_display_name(y_col))
+                    if use_range:
+                        axes[i].set_ylim(y_min, y_max)
+
+                axes[-1].set_xlabel(final_xlabel)
+
+                if custom_title:
+                    fig.suptitle(custom_title)
+
+            fig.tight_layout()
+            self.canvas.draw()
 
     # -------------------------
     # SAVE / DOWNLOAD
@@ -1087,9 +1135,12 @@ class LabDataPlotterApp:
         # is applied only for savefig and restored afterwards.
         original_size = self.figure.get_size_inches().copy()
         try:
-            self.figure.set_size_inches(width, height)
-            self.figure.tight_layout()
-            self.figure.savefig(path, format=ext, dpi=dpi)
+            with matplotlib.rc_context(
+                {"font.size": self._figure_option("font_size", 10)}
+            ):
+                self.figure.set_size_inches(width, height)
+                self.figure.tight_layout()
+                self.figure.savefig(path, format=ext, dpi=dpi)
             self.log_message(f"Figure saved to {path} ({width}x{height} in, {dpi:g} dpi)")
         except Exception as e:
             self.log_message(f"Could not save figure: {e}")
